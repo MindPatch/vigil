@@ -1,0 +1,20 @@
+# Custom rules file for js-deob
+# Add your own detection rules here, then pass with: js-deob --rules rules/custom.toml
+
+[[rule]]
+id = "CUSTOM-001"
+name = "Suspicious domain"
+description = "Hardcoded request to known malicious staging domain"
+severity = "critical"
+kind = "regex"
+pattern = '''https?://[a-z0-9]{12,}\.(?:xyz|top|tk|ml|ga|cf)/'''
+tags = ["supply-chain", "c2"]
+
+[[rule]]
+id = "CUSTOM-002"
+name = "Webpack override"
+description = "Overriding __webpack_require__ — module hijacking technique"
+severity = "high"
+kind = "regex"
+pattern = '''__webpack_require__\s*='''
+tags = ["supply-chain", "hijack"]
