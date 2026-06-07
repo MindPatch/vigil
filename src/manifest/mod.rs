@@ -442,7 +442,7 @@ fn check_typosquats(
                     "Dependency \"{dep}\" matches the popular package \"{popular}\" \
                      after normalizing separators — a common typosquat technique.",
                 ),
-                severity: "high".to_string(),
+                severity: "medium".to_string(),
                 file: file.to_string(),
                 detail: format!("{dep} ~ {popular} (separator trick)"),
             });
@@ -453,7 +453,7 @@ fn check_typosquats(
             let threshold = typosquat_threshold(popular, bare);
             let dist = levenshtein(bare, popular);
             if dist > 0 && dist <= threshold {
-                let severity = if dist == 1 { "high" } else { "medium" };
+                let severity = "medium";
                 findings.push(ManifestFinding {
                     rule_id: "MANIFEST-002".to_string(),
                     name: "Potential typosquat dependency".to_string(),
