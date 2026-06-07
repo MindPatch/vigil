@@ -336,7 +336,7 @@ pub fn print_sarif(findings: &[Finding], tool_version: &str) {
             {
                 "tool": {
                     "driver": {
-                        "name": "ankh",
+                        "name": "vigil",
                         "version": tool_version,
                         "rules": rule_descriptors
                     }

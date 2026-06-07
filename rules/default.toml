@@ -1,5 +1,5 @@
-# Custom rules file for js-deob
-# Add your own detection rules here, then pass with: js-deob --rules rules/custom.toml
+# Custom rules file for Vigil
+# Add your own detection rules here, then pass with: vigil --rules rules/custom.toml
 
 [[rule]]
 id = "CUSTOM-001"
