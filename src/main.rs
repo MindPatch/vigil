@@ -1,9 +1,6 @@
-mod deobfuscator;
-mod engine;
-mod manifest;
-mod parser;
-mod report;
-mod rules;
+use vigil::{
+    config, deobfuscator, engine, manifest, monitor, parser, report, rules, scanner, webhook,
+};
 
 use clap::Parser as ClapParser;
 use colored::Colorize;
@@ -74,6 +71,30 @@ struct Cli {
     /// List all detection rules and exit
     #[arg(long)]
     list_rules: bool,
+
+    /// Run in continuous monitor mode: file watch + npm registry polling
+    #[arg(long)]
+    monitor: bool,
+
+    /// Path to a vigil.toml config (defaults to ./vigil.toml if present)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// After a one-shot scan, send results to configured webhooks
+    #[arg(long)]
+    notify: bool,
+
+    /// Print recent Telegram chat IDs for a bot TOKEN, then exit
+    #[arg(long, value_name = "TOKEN")]
+    telegram_chat_ids: Option<String>,
+
+    /// Suppress findings recorded in this baseline file (triage workflow)
+    #[arg(long, value_name = "FILE")]
+    baseline: Option<PathBuf>,
+
+    /// Write the current findings to --baseline as the accepted baseline, then exit
+    #[arg(long, requires = "baseline")]
+    write_baseline: bool,
 }
 
 fn print_banner() {
@@ -107,26 +128,22 @@ fn main() {
         return;
     }
 
+    if let Some(token) = &cli.telegram_chat_ids {
+        run_telegram_discovery(token);
+        return;
+    }
+
     if cli.deobfuscate {
         run_deobfuscate(&cli);
         return;
     }
 
-    let ruleset = match &cli.rules {
-        Some(path) => match rules::RuleSet::from_file(path) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "{} Failed to load rules from {}: {}",
-                    "error:".red().bold(),
-                    path.display(),
-                    e
-                );
-                std::process::exit(1);
-            }
-        },
-        None => rules::RuleSet::default_rules(),
-    };
+    if cli.monitor {
+        run_monitor(&cli);
+        return;
+    }
+
+    let ruleset = load_ruleset(&cli);
 
     let min_severity = match cli.severity.as_str() {
         "low" => rules::Severity::Low,
@@ -263,28 +280,52 @@ fn main() {
     dedup_findings(&mut all_findings);
     all_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
-    let scan_duration = scan_start.elapsed();
-
-    if !cli.quiet {
-        if cli.format == "text" {
-            let js_count = js_files.len();
-            let manifest_count = manifest_files.len();
+    // Baseline / triage: write a snapshot, or suppress already-accepted findings.
+    if let Some(baseline_path) = &cli.baseline {
+        if cli.write_baseline {
+            write_baseline_file(baseline_path, &all_findings);
+            return;
+        }
+        let accepted = load_baseline_file(baseline_path);
+        let before = all_findings.len();
+        all_findings.retain(|f| !accepted.contains(&f.dedup_key()));
+        let suppressed = before - all_findings.len();
+        if suppressed > 0 && !cli.quiet && cli.format == "text" {
             eprintln!(
-                "\n{} {} JS/TS, {} manifest{} ({}) in {}\n",
-                "Scanned:".dimmed(),
-                js_count,
-                manifest_count,
-                if manifest_count != 1 { "s" } else { "" },
-                format_bytes(total_bytes),
-                format_duration(scan_duration),
+                "{} {} finding(s) suppressed by baseline {}",
+                "baseline:".dimmed(),
+                suppressed,
+                baseline_path.display()
             );
         }
+    }
 
-        match cli.format.as_str() {
-            "json" => report::print_json(&all_findings),
-            "sarif" => report::print_sarif(&all_findings, env!("CARGO_PKG_VERSION")),
-            _ => report::print_text(&all_findings, cli.verbose),
+    let scan_duration = scan_start.elapsed();
+
+    // Machine-readable formats (json/sarif) always emit so they're usable in CI
+    // with --quiet; only the human text report and timing line are suppressed.
+    match cli.format.as_str() {
+        "json" => report::print_json(&all_findings),
+        "sarif" => report::print_sarif(&all_findings, env!("CARGO_PKG_VERSION")),
+        _ => {
+            if !cli.quiet {
+                eprintln!(
+                    "\n{} {} JS/TS, {} manifest{} ({}) in {}\n",
+                    "Scanned:".dimmed(),
+                    js_files.len(),
+                    manifest_files.len(),
+                    if manifest_files.len() != 1 { "s" } else { "" },
+                    format_bytes(total_bytes),
+                    format_duration(scan_duration),
+                );
+                report::print_text(&all_findings, cli.verbose);
+            }
         }
+    }
+    let _ = scan_duration;
+
+    if cli.notify {
+        dispatch_oneshot_webhooks(&cli, &paths, &all_findings);
     }
 
     let exit_severity = match cli.exit_threshold.as_str() {
@@ -748,6 +789,150 @@ fn pretty_print_js(source: &str) -> String {
     }
 
     cleaned.trim_end().to_string()
+}
+
+/// Load accepted finding keys from a baseline file (one `dedup_key` per line;
+/// blank lines and `#` comments ignored).
+fn load_baseline_file(path: &std::path::Path) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            keys.insert(line.to_string());
+        }
+    }
+    keys
+}
+
+/// Write the current findings to a baseline file as the accepted set.
+fn write_baseline_file(path: &std::path::Path, findings: &[engine::Finding]) {
+    let mut lines = vec![
+        "# Vigil baseline — accepted findings, suppressed on future scans.".to_string(),
+        format!("# {} finding(s) accepted.", findings.len()),
+    ];
+    let mut keys: Vec<String> = findings.iter().map(|f| f.dedup_key()).collect();
+    keys.sort();
+    keys.dedup();
+    lines.extend(keys);
+    let body = lines.join("\n") + "\n";
+    match std::fs::write(path, body) {
+        Ok(_) => eprintln!(
+            "{} wrote {} accepted finding(s) to {}",
+            "baseline:".green().bold(),
+            findings.len(),
+            path.display()
+        ),
+        Err(e) => {
+            eprintln!("{} cannot write baseline {}: {e}", "error:".red().bold(), path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn load_ruleset(cli: &Cli) -> rules::RuleSet {
+    match &cli.rules {
+        Some(path) => match rules::RuleSet::from_file(path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to load rules from {}: {}",
+                    "error:".red().bold(),
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => rules::RuleSet::default_rules(),
+    }
+}
+
+fn load_config(cli: &Cli) -> config::Config {
+    match &cli.config {
+        Some(path) => match config::Config::from_file(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to load config {}: {}",
+                    "error:".red().bold(),
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => config::Config::discover(std::path::Path::new(".")).unwrap_or_default(),
+    }
+}
+
+fn run_monitor(cli: &Cli) {
+    let mut cfg = load_config(cli);
+    if !cli.paths.is_empty() {
+        cfg.monitor.paths = cli.paths.clone();
+    }
+    if cfg.webhooks.is_empty() {
+        eprintln!(
+            "{} no [[webhook]] targets in config — monitoring without notifications",
+            "warn:".yellow().bold()
+        );
+    }
+    let ruleset = load_ruleset(cli);
+    let opts = scanner::ScanOptions {
+        no_deobfuscate: cli.no_deobfuscate,
+        max_file_size: cli.max_file_size,
+        verbose: cli.verbose,
+    };
+    let mut mon = monitor::Monitor::new(cfg, ruleset, opts);
+    mon.run();
+}
+
+fn run_telegram_discovery(token: &str) {
+    match webhook::discover_telegram_chats(token) {
+        Ok(chats) if !chats.is_empty() => {
+            println!("{}", "Recent Telegram chats:".bold());
+            for (id, label) in chats {
+                println!("  {}  {}", id.cyan().bold(), label.dimmed());
+            }
+            println!("\nAdd the chat_id you want to your vigil.toml [[webhook]] entry.");
+        }
+        Ok(_) => {
+            println!(
+                "No recent chats found. Send a message to your bot in the target \
+                 chat/group first, then run this again."
+            );
+        }
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn dispatch_oneshot_webhooks(cli: &Cli, paths: &[PathBuf], findings: &[engine::Finding]) {
+    let cfg = load_config(cli);
+    if cfg.webhooks.is_empty() {
+        eprintln!(
+            "{} --notify set but no [[webhook]] targets in config",
+            "warn:".yellow().bold()
+        );
+        return;
+    }
+    let subject = paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outcome = webhook::ScanOutcome::new(subject, findings.to_vec());
+    let results = webhook::dispatch(&cfg.webhooks, &outcome);
+    for r in results {
+        match r.outcome {
+            Ok(code) => eprintln!("{} {} ({})", "notified:".green().bold(), r.url, code),
+            Err(e) => eprintln!("{} {} — {e}", "webhook failed:".red().bold(), r.url),
+        }
+    }
 }
 
 fn print_rules_table() {
