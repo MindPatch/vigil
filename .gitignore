@@ -1,1 +1,4 @@
 /target
+# local config may contain secrets (bot tokens, webhook URLs)
+vigil.toml
+.vigil-cache

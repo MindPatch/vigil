@@ -1,9 +1,6 @@
-mod deobfuscator;
-mod engine;
-mod manifest;
-mod parser;
-mod report;
-mod rules;
+use vigil::{
+    config, deobfuscator, engine, manifest, monitor, parser, report, rules, scanner, webhook,
+};
 
 use clap::Parser as ClapParser;
 use colored::Colorize;
@@ -14,7 +11,7 @@ use std::sync::Mutex;
 use walkdir::WalkDir;
 
 #[derive(ClapParser)]
-#[command(name = "ankh", version, about = "Ankh — Supply chain attack detector with advanced JS deobfuscation")]
+#[command(name = "vigil", version, about = "Vigil — Supply chain attack detector with deobfuscation-first static analysis")]
 struct Cli {
     /// Files or directories to scan
     paths: Vec<PathBuf>,
@@ -70,22 +67,70 @@ struct Cli {
     /// Suppress all output except exit code
     #[arg(short, long)]
     quiet: bool,
+
+    /// List all detection rules and exit
+    #[arg(long)]
+    list_rules: bool,
+
+    /// Run in continuous monitor mode: file watch + npm registry polling
+    #[arg(long)]
+    monitor: bool,
+
+    /// Path to a vigil.toml config (defaults to ./vigil.toml if present)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// After a one-shot scan, send results to configured webhooks
+    #[arg(long)]
+    notify: bool,
+
+    /// Print recent Telegram chat IDs for a bot TOKEN, then exit
+    #[arg(long, value_name = "TOKEN")]
+    telegram_chat_ids: Option<String>,
+
+    /// Suppress findings recorded in this baseline file (triage workflow)
+    #[arg(long, value_name = "FILE")]
+    baseline: Option<PathBuf>,
+
+    /// Write the current findings to --baseline as the accepted baseline, then exit
+    #[arg(long, requires = "baseline")]
+    write_baseline: bool,
 }
 
-const BANNER: &str = r"
-     _    _   _ _  __ _   _
-    / \  | \ | | |/ /| | | |
-   / _ \ |  \| | ' / | |_| |
-  / ___ \| |\  | . \ |  _  |
- /_/   \_\_| \_|_|\_\|_| |_|
-  Supply Chain Attack Detector
-";
+fn print_banner() {
+    let version = env!("CARGO_PKG_VERSION");
+    let rule_count = rules::RuleSet::default_rules().rules.len();
+    eprintln!();
+    eprintln!("  {}  {}", "⠀⣠⣤⣤⣤⣄".cyan(), "╔═════════════════════════════════════════════╗".cyan());
+    eprintln!("  {}  {}", "⢰⣿⡟⠁⠈⢻⣿⡆".cyan(), format!("║  {} {}  ║",
+        "V I G I L".bold().white(),
+        format!("v{version}  |  {rule_count} rules").dimmed()));
+    eprintln!("  {}  {}", "⠘⣿⣧⡀⢀⣼⣿⠃".cyan(), format!("║  {}     ║",
+        "Supply chain attack detector".white()));
+    eprintln!("  {}   {}", "⠀⠙⠿⣿⣿⠿⠋".cyan(), format!("║  {}  ║",
+        "Deobfuscation-first static analysis".dimmed()));
+    eprintln!("  {}    {}", "⠀⠀⢰⣿⡇".cyan(), "╚═════════════════════════════════════════════╝".cyan());
+    eprintln!("  {}", "⠀⠀⠸⠿⠇".cyan());
+    eprintln!();
+}
 
 fn main() {
     let cli = Cli::parse();
 
-    if !cli.deobfuscate || cli.verbose {
-        eprintln!("{}", BANNER.cyan());
+    if !cli.quiet {
+        if !cli.deobfuscate || cli.verbose {
+            print_banner();
+        }
+    }
+
+    if cli.list_rules {
+        print_rules_table();
+        return;
+    }
+
+    if let Some(token) = &cli.telegram_chat_ids {
+        run_telegram_discovery(token);
+        return;
     }
 
     if cli.deobfuscate {
@@ -93,21 +138,12 @@ fn main() {
         return;
     }
 
-    let ruleset = match &cli.rules {
-        Some(path) => match rules::RuleSet::from_file(path) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "{} Failed to load rules from {}: {}",
-                    "error:".red().bold(),
-                    path.display(),
-                    e
-                );
-                std::process::exit(1);
-            }
-        },
-        None => rules::RuleSet::default_rules(),
-    };
+    if cli.monitor {
+        run_monitor(&cli);
+        return;
+    }
+
+    let ruleset = load_ruleset(&cli);
 
     let min_severity = match cli.severity.as_str() {
         "low" => rules::Severity::Low,
@@ -125,7 +161,7 @@ fn main() {
     };
 
     let paths = resolve_paths(&cli.paths);
-    let ignore_set = load_ankhignore(&paths);
+    let ignore_set = load_vigilignore(&paths);
 
     // Collect all scannable files
     let mut js_files: Vec<PathBuf> = Vec::new();
@@ -134,7 +170,7 @@ fn main() {
     for path in &paths {
         if path.is_file() {
             let p = path.to_path_buf();
-            if is_ignored_by_ankhignore(&p, &ignore_set) {
+            if is_ignored_by_vigilignore(&p, &ignore_set) {
                 continue;
             }
             if is_scannable_file(path) {
@@ -150,7 +186,7 @@ fn main() {
             {
                 if entry.file_type().is_file() {
                     let p = entry.into_path();
-                    if is_ignored_by_ankhignore(&p, &ignore_set) {
+                    if is_ignored_by_vigilignore(&p, &ignore_set) {
                         continue;
                     }
                     if is_scannable_file(&p) {
@@ -166,7 +202,16 @@ fn main() {
     // Pre-compile regexes once — shared across all rayon threads
     let compiled = ruleset.compile();
 
+    let scan_start = std::time::Instant::now();
     let mut all_findings: Vec<engine::Finding> = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    for f in &js_files {
+        total_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+    }
+    for f in &manifest_files {
+        total_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+    }
 
     // Scan JS/TS files in parallel with rayon (skip if --manifest-only)
     if !cli.manifest_only {
@@ -235,12 +280,52 @@ fn main() {
     dedup_findings(&mut all_findings);
     all_findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
-    if !cli.quiet {
-        match cli.format.as_str() {
-            "json" => report::print_json(&all_findings),
-            "sarif" => report::print_sarif(&all_findings, env!("CARGO_PKG_VERSION")),
-            _ => report::print_text(&all_findings, cli.verbose),
+    // Baseline / triage: write a snapshot, or suppress already-accepted findings.
+    if let Some(baseline_path) = &cli.baseline {
+        if cli.write_baseline {
+            write_baseline_file(baseline_path, &all_findings);
+            return;
         }
+        let accepted = load_baseline_file(baseline_path);
+        let before = all_findings.len();
+        all_findings.retain(|f| !accepted.contains(&f.dedup_key()));
+        let suppressed = before - all_findings.len();
+        if suppressed > 0 && !cli.quiet && cli.format == "text" {
+            eprintln!(
+                "{} {} finding(s) suppressed by baseline {}",
+                "baseline:".dimmed(),
+                suppressed,
+                baseline_path.display()
+            );
+        }
+    }
+
+    let scan_duration = scan_start.elapsed();
+
+    // Machine-readable formats (json/sarif) always emit so they're usable in CI
+    // with --quiet; only the human text report and timing line are suppressed.
+    match cli.format.as_str() {
+        "json" => report::print_json(&all_findings),
+        "sarif" => report::print_sarif(&all_findings, env!("CARGO_PKG_VERSION")),
+        _ => {
+            if !cli.quiet {
+                eprintln!(
+                    "\n{} {} JS/TS, {} manifest{} ({}) in {}\n",
+                    "Scanned:".dimmed(),
+                    js_files.len(),
+                    manifest_files.len(),
+                    if manifest_files.len() != 1 { "s" } else { "" },
+                    format_bytes(total_bytes),
+                    format_duration(scan_duration),
+                );
+                report::print_text(&all_findings, cli.verbose);
+            }
+        }
+    }
+    let _ = scan_duration;
+
+    if cli.notify {
+        dispatch_oneshot_webhooks(&cli, &paths, &all_findings);
     }
 
     let exit_severity = match cli.exit_threshold.as_str() {
@@ -257,7 +342,7 @@ fn main() {
 
 fn run_deobfuscate(cli: &Cli) {
     let paths = resolve_paths(&cli.paths);
-    let ignore_set = load_ankhignore(&paths);
+    let ignore_set = load_vigilignore(&paths);
 
     for_each_scannable_file(&paths, &ignore_set, |path| {
         let source = match std::fs::read_to_string(path) {
@@ -411,15 +496,15 @@ fn scan_file(
     findings
 }
 
-/// Collect line numbers that have `// ankh-ignore` on the previous line or same line.
+/// Collect line numbers that have `// vigil-ignore` on the previous line or same line.
 fn collect_suppressed_lines(source: &str) -> HashSet<usize> {
     let mut suppressed = HashSet::new();
     for (i, line) in source.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed.contains("ankh-ignore-next-line") {
+        if trimmed.contains("vigil-ignore-next-line") {
             suppressed.insert(i + 2); // next line (1-indexed)
         }
-        if trimmed.contains("ankh-ignore-line") {
+        if trimmed.contains("vigil-ignore-line") {
             suppressed.insert(i + 1); // same line
         }
     }
@@ -447,7 +532,7 @@ fn for_each_scannable_file(
 ) {
     for path in paths {
         if path.is_file() {
-            if is_scannable_file(path) && !is_ignored_by_ankhignore(path, ignore_set) {
+            if is_scannable_file(path) && !is_ignored_by_vigilignore(path, ignore_set) {
                 callback(path);
             }
         } else {
@@ -458,7 +543,7 @@ fn for_each_scannable_file(
             {
                 if entry.file_type().is_file() {
                     let p = entry.path();
-                    if is_scannable_file(p) && !is_ignored_by_ankhignore(p, ignore_set) {
+                    if is_scannable_file(p) && !is_ignored_by_vigilignore(p, ignore_set) {
                         callback(p);
                     }
                 }
@@ -491,12 +576,12 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_str().unwrap_or("");
     matches!(
         name,
-        "node_modules" | ".git" | "dist" | "build" | ".next" | "vendor" | ".ankh-cache"
+        "node_modules" | ".git" | "dist" | "build" | ".next" | "vendor" | ".vigil-cache"
     )
 }
 
-/// Load .ankhignore file (gitignore-style glob patterns, one per line).
-fn load_ankhignore(paths: &[PathBuf]) -> HashSet<PathBuf> {
+/// Load .vigilignore file (gitignore-style glob patterns, one per line).
+fn load_vigilignore(paths: &[PathBuf]) -> HashSet<PathBuf> {
     let mut ignored = HashSet::new();
 
     for path in paths {
@@ -506,7 +591,7 @@ fn load_ankhignore(paths: &[PathBuf]) -> HashSet<PathBuf> {
             path.as_path()
         };
 
-        let ignore_file = base.join(".ankhignore");
+        let ignore_file = base.join(".vigilignore");
         if let Ok(content) = std::fs::read_to_string(&ignore_file) {
             for line in content.lines() {
                 let line = line.trim();
@@ -526,7 +611,7 @@ fn load_ankhignore(paths: &[PathBuf]) -> HashSet<PathBuf> {
     ignored
 }
 
-fn is_ignored_by_ankhignore(path: &std::path::Path, ignore_set: &HashSet<PathBuf>) -> bool {
+fn is_ignored_by_vigilignore(path: &std::path::Path, ignore_set: &HashSet<PathBuf>) -> bool {
     if ignore_set.is_empty() {
         return false;
     }
@@ -704,6 +789,186 @@ fn pretty_print_js(source: &str) -> String {
     }
 
     cleaned.trim_end().to_string()
+}
+
+/// Load accepted finding keys from a baseline file (one `dedup_key` per line;
+/// blank lines and `#` comments ignored).
+fn load_baseline_file(path: &std::path::Path) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            keys.insert(line.to_string());
+        }
+    }
+    keys
+}
+
+/// Write the current findings to a baseline file as the accepted set.
+fn write_baseline_file(path: &std::path::Path, findings: &[engine::Finding]) {
+    let mut lines = vec![
+        "# Vigil baseline — accepted findings, suppressed on future scans.".to_string(),
+        format!("# {} finding(s) accepted.", findings.len()),
+    ];
+    let mut keys: Vec<String> = findings.iter().map(|f| f.dedup_key()).collect();
+    keys.sort();
+    keys.dedup();
+    lines.extend(keys);
+    let body = lines.join("\n") + "\n";
+    match std::fs::write(path, body) {
+        Ok(_) => eprintln!(
+            "{} wrote {} accepted finding(s) to {}",
+            "baseline:".green().bold(),
+            findings.len(),
+            path.display()
+        ),
+        Err(e) => {
+            eprintln!("{} cannot write baseline {}: {e}", "error:".red().bold(), path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn load_ruleset(cli: &Cli) -> rules::RuleSet {
+    match &cli.rules {
+        Some(path) => match rules::RuleSet::from_file(path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to load rules from {}: {}",
+                    "error:".red().bold(),
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => rules::RuleSet::default_rules(),
+    }
+}
+
+fn load_config(cli: &Cli) -> config::Config {
+    match &cli.config {
+        Some(path) => match config::Config::from_file(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to load config {}: {}",
+                    "error:".red().bold(),
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => config::Config::discover(std::path::Path::new(".")).unwrap_or_default(),
+    }
+}
+
+fn run_monitor(cli: &Cli) {
+    let mut cfg = load_config(cli);
+    if !cli.paths.is_empty() {
+        cfg.monitor.paths = cli.paths.clone();
+    }
+    if cfg.webhooks.is_empty() {
+        eprintln!(
+            "{} no [[webhook]] targets in config — monitoring without notifications",
+            "warn:".yellow().bold()
+        );
+    }
+    let ruleset = load_ruleset(cli);
+    let opts = scanner::ScanOptions {
+        no_deobfuscate: cli.no_deobfuscate,
+        max_file_size: cli.max_file_size,
+        verbose: cli.verbose,
+    };
+    let mut mon = monitor::Monitor::new(cfg, ruleset, opts);
+    mon.run();
+}
+
+fn run_telegram_discovery(token: &str) {
+    match webhook::discover_telegram_chats(token) {
+        Ok(chats) if !chats.is_empty() => {
+            println!("{}", "Recent Telegram chats:".bold());
+            for (id, label) in chats {
+                println!("  {}  {}", id.cyan().bold(), label.dimmed());
+            }
+            println!("\nAdd the chat_id you want to your vigil.toml [[webhook]] entry.");
+        }
+        Ok(_) => {
+            println!(
+                "No recent chats found. Send a message to your bot in the target \
+                 chat/group first, then run this again."
+            );
+        }
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn dispatch_oneshot_webhooks(cli: &Cli, paths: &[PathBuf], findings: &[engine::Finding]) {
+    let cfg = load_config(cli);
+    if cfg.webhooks.is_empty() {
+        eprintln!(
+            "{} --notify set but no [[webhook]] targets in config",
+            "warn:".yellow().bold()
+        );
+        return;
+    }
+    let subject = paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outcome = webhook::ScanOutcome::new(subject, findings.to_vec());
+    let results = webhook::dispatch(&cfg.webhooks, &outcome);
+    for r in results {
+        match r.outcome {
+            Ok(code) => eprintln!("{} {} ({})", "notified:".green().bold(), r.url, code),
+            Err(e) => eprintln!("{} {} — {e}", "webhook failed:".red().bold(), r.url),
+        }
+    }
+}
+
+fn print_rules_table() {
+    let ruleset = rules::RuleSet::default_rules();
+    println!("{:<10} {:<8} {}", "RULE ID".bold(), "SEVERITY".bold(), "NAME".bold());
+    println!("{}", "─".repeat(60));
+    for rule in &ruleset.rules {
+        let sev = match rule.severity {
+            rules::Severity::Critical => "CRIT".red().bold().to_string(),
+            rules::Severity::High => "HIGH".red().to_string(),
+            rules::Severity::Medium => "MED".yellow().to_string(),
+            rules::Severity::Low => "LOW".white().to_string(),
+        };
+        println!("{:<10} {:<8} {}", rule.id.dimmed(), sev, rule.name);
+    }
+    println!("{}", "─".repeat(60));
+    println!("{} rules total", ruleset.rules.len());
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms >= 1000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        format!("{}ms", ms)
+    }
 }
 
 fn push_indent(out: &mut String, level: usize) {

@@ -2,6 +2,12 @@ use super::Match;
 use crate::rules::{CompiledRegex, Rule};
 use tree_sitter::{Node, Tree};
 
+/// Window (in bytes) around a primary match within which the secondary pattern
+/// must also appear. File-wide correlation produces false positives on large
+/// bundles (e.g. `fetch(` and the word `token` appearing in unrelated code), so
+/// correlation is local: the two signals must be near each other.
+const CORRELATION_WINDOW: usize = 400;
+
 pub fn match_regex_compiled(source: &str, _rule: &Rule, compiled: &CompiledRegex) -> Vec<Match> {
     let re = match &compiled.primary {
         Some(r) => r,
@@ -10,18 +16,44 @@ pub fn match_regex_compiled(source: &str, _rule: &Rule, compiled: &CompiledRegex
 
     let mut results = Vec::new();
 
-    // Pre-check secondary pattern against entire file for multi-line correlation
-    if let Some(re2) = &compiled.secondary {
-        if !re2.is_match(source) {
-            return vec![];
+    match &compiled.secondary {
+        // Correlated rule: secondary must appear within a local window of each
+        // primary match, not just somewhere in the file.
+        Some(re2) => {
+            for m in re.find_iter(source) {
+                let lo = snap_lo(source, m.start().saturating_sub(CORRELATION_WINDOW));
+                let hi = snap_hi(source, m.end() + CORRELATION_WINDOW);
+                if re2.is_match(&source[lo..hi]) {
+                    results.push(Match::from_byte_offset(source, m.start()));
+                }
+            }
+        }
+        None => {
+            for m in re.find_iter(source) {
+                results.push(Match::from_byte_offset(source, m.start()));
+            }
         }
     }
 
-    for m in re.find_iter(source) {
-        results.push(Match::from_byte_offset(source, m.start()));
-    }
-
     results
+}
+
+/// Snap a byte index down to the nearest UTF-8 char boundary.
+fn snap_lo(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Snap a byte index up to the nearest UTF-8 char boundary.
+fn snap_hi(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 pub fn match_call_expr(source: &str, tree: &Tree, rule: &Rule) -> Vec<Match> {

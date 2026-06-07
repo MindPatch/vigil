@@ -1,0 +1,50 @@
+# Example Vigil config. Copy to `vigil.toml` and fill in your secrets.
+# `vigil.toml` is gitignored so tokens never get committed.
+#
+# Run the monitor:   vigil --monitor
+# One-shot + notify: vigil ./pkg --notify
+
+[monitor]
+paths = ["."]          # paths to watch and read dependencies from
+watch = true           # re-scan local files when they change
+registry = true        # poll the npm registry for new dependency versions
+interval = "10m"       # registry poll interval (e.g. "30s", "5m", "1h")
+# registry_url = "https://registry.npmjs.org"   # override for a private registry
+
+# --- Webhook targets -------------------------------------------------------
+# Each [[webhook]] fires when a scan produces findings matching its filters.
+#   threshold : minimum severity (low | medium | high | critical)
+#   events    : "block" fires on a BLOCK verdict; "finding" fires on any
+#               finding at/above the threshold.
+
+# Telegram bot:
+#   1. Create a bot with @BotFather and copy its token.
+#   2. Message the bot once, then run: vigil --telegram-chat-ids "<token>"
+#   3. Put the printed chat_id below.
+[[webhook]]
+format = "telegram"
+token = "123456:ABC-your-bot-token"
+chat_id = "123456789"
+threshold = "high"
+events = ["block", "finding"]
+
+# Slack incoming webhook:
+# [[webhook]]
+# format = "slack"
+# url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+# threshold = "critical"
+# events = ["block"]
+
+# Discord webhook:
+# [[webhook]]
+# format = "discord"
+# url = "https://discord.com/api/webhooks/XXX/YYY"
+# threshold = "high"
+# events = ["block", "finding"]
+
+# Generic JSON POST to any endpoint:
+# [[webhook]]
+# format = "generic"
+# url = "https://example.com/vigil-hook"
+# threshold = "medium"
+# events = ["finding"]

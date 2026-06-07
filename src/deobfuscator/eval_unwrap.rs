@@ -31,7 +31,7 @@ fn unwrap_eval_quoted(source: &str, quote: char) -> (String, usize) {
 
     let result = re.replace_all(source, |caps: &regex::Captures| {
         changes += 1;
-        format!("/* ankh:eval */ {}", &caps[1])
+        format!("/* vigil:eval */ {}", &caps[1])
     });
 
     (result.into_owned(), changes)
@@ -56,7 +56,7 @@ fn unwrap_func_quoted(source: &str, quote: char) -> (String, usize) {
 
     let result = re.replace_all(source, |caps: &regex::Captures| {
         changes += 1;
-        format!("/* ankh:Function */ {}", &caps[1])
+        format!("/* vigil:Function */ {}", &caps[1])
     });
 
     (result.into_owned(), changes)
@@ -82,7 +82,7 @@ fn unwrap_timeout_quoted(source: &str, quote: char) -> (String, usize) {
     let result = re.replace_all(source, |caps: &regex::Captures| {
         changes += 1;
         format!(
-            "setTimeout(function(){{ /* ankh:timeout */ {} }}, {})",
+            "setTimeout(function(){{ /* vigil:timeout */ {} }}, {})",
             &caps[1], &caps[2]
         )
     });
@@ -110,7 +110,7 @@ fn unwrap_interval_quoted(source: &str, quote: char) -> (String, usize) {
     let result = re.replace_all(source, |caps: &regex::Captures| {
         changes += 1;
         format!(
-            "setInterval(function(){{ /* ankh:interval */ {} }}, {})",
+            "setInterval(function(){{ /* vigil:interval */ {} }}, {})",
             &caps[1], &caps[2]
         )
     });
@@ -137,7 +137,7 @@ mod tests {
     fn test_eval_unwrap() {
         let input = r#"eval("console.log('pwned')");"#;
         let (output, changes) = unwrap_eval_string(input);
-        assert_eq!(output, r#"/* ankh:eval */ console.log('pwned');"#);
+        assert_eq!(output, r#"/* vigil:eval */ console.log('pwned');"#);
         assert_eq!(changes, 1);
     }
 
@@ -145,7 +145,7 @@ mod tests {
     fn test_function_constructor() {
         let input = r#"var f = new Function("return 42")();"#;
         let (output, changes) = unwrap_function_constructor(input);
-        assert_eq!(output, r#"var f = /* ankh:Function */ return 42;"#);
+        assert_eq!(output, r#"var f = /* vigil:Function */ return 42;"#);
         assert_eq!(changes, 1);
     }
 
@@ -153,7 +153,7 @@ mod tests {
     fn test_settimeout_unwrap() {
         let input = r#"setTimeout("alert(1)", 100);"#;
         let (output, changes) = unwrap_settimeout_string(input);
-        assert_eq!(output, r#"setTimeout(function(){ /* ankh:timeout */ alert(1) }, 100);"#);
+        assert_eq!(output, r#"setTimeout(function(){ /* vigil:timeout */ alert(1) }, 100);"#);
         assert_eq!(changes, 1);
     }
 
@@ -161,7 +161,7 @@ mod tests {
     fn test_eval_escaped_quotes() {
         let input = r#"eval("say \"hi\"")"#;
         let (output, changes) = unwrap_eval_string(input);
-        assert_eq!(output, r#"/* ankh:eval */ say \"hi\""#);
+        assert_eq!(output, r#"/* vigil:eval */ say \"hi\""#);
         assert_eq!(changes, 1);
     }
 
@@ -169,7 +169,7 @@ mod tests {
     fn test_setinterval_unwrap() {
         let input = r#"setInterval("ping()", 5000);"#;
         let (output, changes) = unwrap_setinterval_string(input);
-        assert_eq!(output, r#"setInterval(function(){ /* ankh:interval */ ping() }, 5000);"#);
+        assert_eq!(output, r#"setInterval(function(){ /* vigil:interval */ ping() }, 5000);"#);
         assert_eq!(changes, 1);
     }
 }

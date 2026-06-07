@@ -1,8 +1,8 @@
 [package]
-name = "ankh"
+name = "vigil"
 version = "0.3.0"
 edition = "2021"
-description = "Ankh — Supply chain attack detector with rules-based scanning and advanced JavaScript deobfuscation"
+description = "Vigil — Supply chain attack detector with deobfuscation-first static analysis for JavaScript/npm"
 
 [dependencies]
 tree-sitter = "0.24"
@@ -17,3 +17,8 @@ regex = "1"
 serde_json = "1"
 rayon = "1.10"
 glob = "0.3"
+# monitor + webhooks
+notify = "6"
+ureq = { version = "2", features = ["json", "tls"] }
+flate2 = "1"
+tar = "0.4"
