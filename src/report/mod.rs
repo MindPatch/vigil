@@ -64,7 +64,15 @@ pub fn compute_score(findings: &[Finding]) -> RiskScore {
     let mut raw: u32 = 0;
     let mut cat_points: HashMap<&'static str, (usize, u32)> = HashMap::new();
 
+    // Score by DISTINCT rule, not by occurrence count. A large minified bundle
+    // that trips the same rule 100 times is not 100× riskier than tripping it
+    // once — counting occurrences let file size, not risk, drive the verdict.
+    let mut counted_rules = std::collections::HashSet::new();
+
     for f in findings {
+        if !counted_rules.insert(f.rule_id.as_str()) {
+            continue;
+        }
         let pts = match f.severity {
             Severity::Critical => 25,
             Severity::High => 10,

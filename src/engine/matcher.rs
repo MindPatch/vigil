@@ -6,7 +6,7 @@ use tree_sitter::{Node, Tree};
 /// must also appear. File-wide correlation produces false positives on large
 /// bundles (e.g. `fetch(` and the word `token` appearing in unrelated code), so
 /// correlation is local: the two signals must be near each other.
-const CORRELATION_WINDOW: usize = 400;
+const CORRELATION_WINDOW: usize = 150;
 
 pub fn match_regex_compiled(source: &str, _rule: &Rule, compiled: &CompiledRegex) -> Vec<Match> {
     let re = match &compiled.primary {
