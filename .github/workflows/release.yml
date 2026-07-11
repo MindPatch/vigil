@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf vigil-${{ github.ref_name }}-${{ matrix.target }}.tar.gz vigil
+          shasum -a 256 vigil-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > vigil-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path vigil.exe -DestinationPath vigil-${{ github.ref_name }}-${{ matrix.target }}.zip
+          (Get-FileHash vigil-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash | Out-File vigil-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            target/${{ matrix.target }}/release/vigil-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/vigil-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+            target/${{ matrix.target }}/release/vigil-${{ github.ref_name }}-${{ matrix.target }}.zip
+            target/${{ matrix.target }}/release/vigil-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
