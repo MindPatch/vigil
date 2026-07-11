@@ -132,127 +132,184 @@ pub fn compute_score(findings: &[Finding]) -> RiskScore {
     RiskScore { score, level, categories, tags }
 }
 
-pub fn print_text(findings: &[Finding], verbose: bool) {
-    if findings.is_empty() {
-        println!("{}", "No findings.".green().bold());
-        print_score_card(findings);
-        return;
-    }
-
-    let (crit, high, med, low) = count_by_severity(findings);
-    println!(
-        "\n{} {} finding(s): {} critical, {} high, {} medium, {} low\n",
-        "SCAN COMPLETE:".bold(),
-        findings.len(),
-        crit.to_string().red().bold(),
-        high.to_string().red(),
-        med.to_string().yellow(),
-        low.to_string().white(),
-    );
-
-    for f in findings {
-        let sev = match f.severity {
-            Severity::Critical => f.severity.to_string().on_red().white().bold(),
-            Severity::High => f.severity.to_string().red().bold(),
-            Severity::Medium => f.severity.to_string().yellow().bold(),
-            Severity::Low => f.severity.to_string().white().bold(),
-        };
-
-        let deob_marker = if f.deobfuscated { " [deobfuscated]".magenta().to_string() } else { String::new() };
-        println!(
-            "[{}] {} {}{} ({})",
-            sev,
-            f.rule_id.dimmed(),
-            f.rule_name.bold(),
-            deob_marker,
-            f.file,
-        );
-        println!(
-            "     {}:{} {}",
-            format!("line {}", f.line).cyan(),
-            f.column,
-            f.description.dimmed(),
-        );
-
-        if verbose {
-            println!("     {}", f.snippet.dimmed());
-            if !f.tags.is_empty() {
-                println!("     tags: {}", f.tags.join(", ").dimmed());
-            }
-        }
-
-        println!();
-    }
-
-    print_score_card(findings);
+/// Scan statistics shown in the text-report summary.
+pub struct ScanStats {
+    pub js_files: usize,
+    pub manifest_files: usize,
+    pub bytes: u64,
+    pub duration: std::time::Duration,
 }
 
-fn print_score_card(findings: &[Finding]) {
-    let rs = compute_score(findings);
-
-    let score_colored = match rs.level {
-        "CLEAN" => format!("{}/100", rs.score).green().bold(),
-        "LOW" => format!("{}/100", rs.score).white().bold(),
-        "MEDIUM" => format!("{}/100", rs.score).yellow().bold(),
-        "HIGH" => format!("{}/100", rs.score).red().bold(),
-        _ => format!("{}/100", rs.score).on_red().white().bold(),
-    };
-
-    let level_colored = match rs.level {
-        "CLEAN" => rs.level.green().bold(),
-        "LOW" => rs.level.white().bold(),
-        "MEDIUM" => rs.level.yellow().bold(),
-        "HIGH" => rs.level.red().bold(),
-        _ => rs.level.on_red().white().bold(),
-    };
-
-    println!("{}", "─".repeat(50).dimmed());
-    println!("  {} {} [{}]", "RISK SCORE:".bold(), score_colored, level_colored);
+pub fn print_text(findings: &[Finding], verbose: bool, stats: &ScanStats) {
     println!();
 
-    for (name, count, pts) in &rs.categories {
-        let bar_len = ((*pts as usize) * 20 / 100.max(1)).min(20);
-        let bar: String = "█".repeat(bar_len);
-        let bar_colored = if *pts >= 25 {
-            bar.red().to_string()
-        } else if *pts >= 10 {
-            bar.yellow().to_string()
-        } else {
-            bar.white().to_string()
-        };
-        println!("  {:<14} {:>2} findings  {:>3} pts  {}",
-            name, count, pts, bar_colored);
-    }
+    if findings.is_empty() {
+        println!(" {} no findings", "[OK]".green().bold());
+    } else {
+        let rule_w = findings.iter().map(|f| f.rule_id.len()).max().unwrap_or(0);
+        let loc_w = findings
+            .iter()
+            .map(|f| location_of(f).len())
+            .max()
+            .unwrap_or(0)
+            .min(56);
 
-    if !rs.tags.is_empty() {
-        println!();
-        let tags_str: Vec<String> = rs.tags.iter().map(|t| {
-            if t == "#malware" {
-                t.red().bold().to_string()
-            } else if t == "#exfiltration" || t == "#execution" {
-                t.yellow().bold().to_string()
+        for f in findings {
+            let tag = severity_tag(f.severity);
+            let deob = if f.deobfuscated {
+                format!(" {}", "[deob]".magenta())
             } else {
-                t.cyan().bold().to_string()
+                String::new()
+            };
+            println!(
+                " {} {}  {}  {}{}",
+                tag,
+                format!("{:<rule_w$}", f.rule_id).cyan(),
+                format!("{:<loc_w$}", location_of(f)),
+                f.rule_name.dimmed(),
+                deob,
+            );
+
+            if verbose {
+                println!("        {}", f.description.dimmed());
+                let snippet = f.snippet.lines().next().unwrap_or("").trim();
+                if !snippet.is_empty() {
+                    let shown: String = snippet.chars().take(96).collect();
+                    println!("        {}", shown.dimmed());
+                }
+                if !f.tags.is_empty() {
+                    println!("        {}", format!("tags: {}", f.tags.join(", ")).dimmed());
+                }
             }
-        }).collect();
-        println!("  {} {}", "TAGS:".bold(), tags_str.join("  "));
+        }
     }
 
-    let is_malware = rs.tags.iter().any(|t| t == "#malware");
-    let verdict = if is_malware {
-        "BLOCK — likely malicious, do not use".on_red().white().bold()
+    print_summary(findings, stats);
+}
+
+fn severity_tag(sev: Severity) -> colored::ColoredString {
+    match sev {
+        Severity::Critical => format!("{:<6}", "[CRIT]").red().bold(),
+        Severity::High => format!("{:<6}", "[HIGH]").red(),
+        Severity::Medium => format!("{:<6}", "[MED]").yellow(),
+        Severity::Low => format!("{:<6}", "[LOW]").dimmed(),
+    }
+}
+
+fn location_of(f: &Finding) -> String {
+    format!("{}:{}", f.file, f.line)
+}
+
+fn print_summary(findings: &[Finding], stats: &ScanStats) {
+    let rs = compute_score(findings);
+    let (crit, high, med, low) = count_by_severity(findings);
+
+    let count = |n: usize, name: &str, colorize: fn(String) -> String| {
+        if n == 0 {
+            format!("{n} {name}").dimmed().to_string()
+        } else {
+            colorize(format!("{n} {name}"))
+        }
+    };
+    let sev_counts = [
+        count(crit, "crit", |s| s.red().bold().to_string()),
+        count(high, "high", |s| s.red().to_string()),
+        count(med, "med", |s| s.yellow().to_string()),
+        count(low, "low", |s| s.normal().to_string()),
+    ]
+    .join(&" · ".dimmed().to_string());
+
+    let score_str = format!("{}/100 {}", rs.score, rs.level);
+    let score_colored = match rs.level {
+        "CLEAN" => score_str.green().bold(),
+        "LOW" => score_str.normal().bold(),
+        "MEDIUM" => score_str.yellow().bold(),
+        "HIGH" => score_str.red().bold(),
+        _ => score_str.red().bold(),
+    };
+
+    let verdict = if rs.is_malware() {
+        "BLOCK — likely malicious, do not use".red().bold()
     } else {
         match rs.level {
             "CLEAN" => "PASS — no issues detected".green().bold(),
-            "LOW" => "PASS — informational findings only".white().bold(),
+            "LOW" => "PASS — informational findings only".green(),
             "MEDIUM" => "REVIEW — suspicious patterns detected".yellow().bold(),
             "HIGH" => "INVESTIGATE — high-risk patterns found".red().bold(),
-            _ => "BLOCK — likely malicious, do not use".on_red().white().bold(),
+            _ => "BLOCK — likely malicious, do not use".red().bold(),
         }
     };
+
+    let label = |s: &str| format!(" {:<10}", s).dimmed();
+
     println!();
-    println!("  {} {}", "VERDICT:".bold(), verdict);
-    println!("{}", "─".repeat(50).dimmed());
+    println!(" {}", "─".repeat(60).dimmed());
+    println!(
+        "{} {} total   {}",
+        label("findings"),
+        findings.len(),
+        sev_counts
+    );
+    println!(
+        "{} {} file{} · {} manifest{} · {} · {}",
+        label("scanned"),
+        stats.js_files,
+        if stats.js_files == 1 { "" } else { "s" },
+        stats.manifest_files,
+        if stats.manifest_files == 1 { "" } else { "s" },
+        format_bytes(stats.bytes),
+        format_duration(stats.duration),
+    );
+    println!("{} {}", label("score"), score_colored);
+    if !rs.categories.is_empty() {
+        let cats: Vec<String> = rs
+            .categories
+            .iter()
+            .map(|(name, _, pts)| format!("{name} {pts}"))
+            .collect();
+        println!(
+            "{} {}",
+            label("breakdown"),
+            cats.join(&" · ".dimmed().to_string()).dimmed()
+        );
+    }
+    if !rs.tags.is_empty() {
+        let tags: Vec<String> = rs
+            .tags
+            .iter()
+            .map(|t| {
+                if t == "#malware" {
+                    t.red().bold().to_string()
+                } else if t == "#exfiltration" || t == "#execution" {
+                    t.yellow().to_string()
+                } else {
+                    t.cyan().to_string()
+                }
+            })
+            .collect();
+        println!("{} {}", label("tags"), tags.join(" "));
+    }
+    println!("{} {}", label("verdict"), verdict);
+    println!(" {}", "─".repeat(60).dimmed());
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms >= 1000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        format!("{}ms", ms)
+    }
 }
 
 pub fn print_json(findings: &[Finding]) {

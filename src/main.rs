@@ -101,16 +101,21 @@ fn print_banner() {
     let version = env!("CARGO_PKG_VERSION");
     let rule_count = rules::RuleSet::default_rules().rules.len();
     eprintln!();
-    eprintln!("  {}  {}", "⠀⣠⣤⣤⣤⣄".cyan(), "╔═════════════════════════════════════════════╗".cyan());
-    eprintln!("  {}  {}", "⢰⣿⡟⠁⠈⢻⣿⡆".cyan(), format!("║  {} {}  ║",
-        "V I G I L".bold().white(),
-        format!("v{version}  |  {rule_count} rules").dimmed()));
-    eprintln!("  {}  {}", "⠘⣿⣧⡀⢀⣼⣿⠃".cyan(), format!("║  {}     ║",
-        "Supply chain attack detector".white()));
-    eprintln!("  {}   {}", "⠀⠙⠿⣿⣿⠿⠋".cyan(), format!("║  {}  ║",
-        "Deobfuscation-first static analysis".dimmed()));
-    eprintln!("  {}    {}", "⠀⠀⢰⣿⡇".cyan(), "╚═════════════════════════════════════════════╝".cyan());
-    eprintln!("  {}", "⠀⠀⠸⠿⠇".cyan());
+    eprintln!("  {}", r"        _       _ __".cyan().bold());
+    eprintln!("  {}", r" _   __(_)___ _(_) /".cyan().bold());
+    eprintln!("  {}", r"| | / / / __ `/ / /".cyan().bold());
+    eprintln!("  {}", r"| |/ / / /_/ / / /".cyan().bold());
+    eprintln!("  {}", r"|___/_/\__, /_/_/".cyan().bold());
+    eprintln!(
+        "  {}        {}",
+        r"      /____/".cyan().bold(),
+        format!("v{version}").yellow().bold()
+    );
+    eprintln!();
+    eprintln!(
+        "  {}",
+        format!("supply-chain attack detection · {rule_count} rules").dimmed()
+    );
     eprintln!();
 }
 
@@ -309,20 +314,16 @@ fn main() {
         "sarif" => report::print_sarif(&all_findings, env!("CARGO_PKG_VERSION")),
         _ => {
             if !cli.quiet {
-                eprintln!(
-                    "\n{} {} JS/TS, {} manifest{} ({}) in {}\n",
-                    "Scanned:".dimmed(),
-                    js_files.len(),
-                    manifest_files.len(),
-                    if manifest_files.len() != 1 { "s" } else { "" },
-                    format_bytes(total_bytes),
-                    format_duration(scan_duration),
-                );
-                report::print_text(&all_findings, cli.verbose);
+                let stats = report::ScanStats {
+                    js_files: js_files.len(),
+                    manifest_files: manifest_files.len(),
+                    bytes: total_bytes,
+                    duration: scan_duration,
+                };
+                report::print_text(&all_findings, cli.verbose, &stats);
             }
         }
     }
-    let _ = scan_duration;
 
     if cli.notify {
         dispatch_oneshot_webhooks(&cli, &paths, &all_findings);
@@ -950,25 +951,6 @@ fn print_rules_table() {
     }
     println!("{}", "─".repeat(60));
     println!("{} rules total", ruleset.rules.len());
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-fn format_duration(d: std::time::Duration) -> String {
-    let ms = d.as_millis();
-    if ms >= 1000 {
-        format!("{:.2}s", d.as_secs_f64())
-    } else {
-        format!("{}ms", ms)
-    }
 }
 
 fn push_indent(out: &mut String, level: usize) {
