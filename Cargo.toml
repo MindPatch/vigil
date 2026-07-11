@@ -2,7 +2,7 @@
 name = "vigil"
 version = "0.3.0"
 edition = "2021"
-description = "Vigil — Supply chain attack detector with deobfuscation-first static analysis for JavaScript/npm"
+description = "Static analyzer that sees through obfuscated supply-chain malware"
 
 [dependencies]
 tree-sitter = "0.24"
