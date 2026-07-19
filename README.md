@@ -35,7 +35,7 @@ $ vigil ./some-package
   |___/_/\__, /_/_/
         /____/        v0.3.0
 
-  supply-chain attack detection · 76 rules
+  supply-chain attack detection · 77 rules
 
 
  [CRIT] SC-034   script.js:3    Hardcoded Discord webhook
@@ -93,7 +93,7 @@ Four steps:
    base64 strings, string-array indirection... it keeps making passes until
    the code stops changing. Findings that came out of hidden code get a
    `[deob]` marker so you know.
-3. Scan with 76 built-in rules, on both the raw and the cleaned source. Some
+3. Scan with 77 built-in rules, on both the raw and the cleaned source. Some
    rules are AST-based (say, `child_process` plus a network call in the same
    file), some are plain regex. package.json goes through its own checks for
    install scripts, typosquats and dependency confusion.
