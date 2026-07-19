@@ -28,21 +28,39 @@ Point it at a package or any folder:
 
 ```
 $ vigil ./some-package
+          _       _ __
+   _   __(_)___ _(_) /
+  | | / / / __ `/ / /
+  | |/ / / /_/ / / /
+  |___/_/\__, /_/_/
+        /____/        v0.3.0
 
- [CRIT] SC-003        malicious.js:30  Network exfiltration
- [CRIT] MANIFEST-001  package.json:1   Malicious install script
- [HIGH] OBF-001       malicious.js:21  eval usage
- [HIGH] SC-011        malicious.js:27  Sensitive file path
- [HIGH] MANIFEST-003  package.json:1   Dependency confusion risk
- [MED]  OBF-005       malicious.js:11  Base64 decode call
- [LOW]  SC-002        malicious.js:3   child_process require
+  supply-chain attack detection · 76 rules
+
+
+ [CRIT] SC-034   script.js:3    Hardcoded Discord webhook
+ [CRIT] SC-034   script.js:4    Hardcoded Discord webhook
+ [HIGH] SC-039   script.js:134  Hand-rolled multipart file upload
+ [HIGH] SC-039   script.js:137  Hand-rolled multipart file upload
+ [HIGH] SC-039   script.js:151  Hand-rolled multipart file upload
+ [MED]  SC-018   script.js:197  OS fingerprinting
+ [MED]  SC-018   script.js:252  OS fingerprinting
+ [LOW]  OBF-006  script.js:3    High-entropy string
+ [LOW]  OBF-006  script.js:4    High-entropy string
+ [LOW]  SC-001   script.js:197  process.env access (dot)
+ [LOW]  SC-001   script.js:197  process.env access (dot)
+ [LOW]  SC-001   script.js:253  process.env access (dot)
+ [LOW]  SC-001   script.js:253  process.env access (dot)
+ [LOW]  SC-007   script.js:130  File system read
 
  ────────────────────────────────────────────────────────────
- findings   15 total   2 crit · 3 high · 5 med · 5 low
- scanned    1 file · 1 manifest · 1.3 KB · 10ms
- score      100/100 CRITICAL
+ findings   14 total   2 crit · 3 high · 2 med · 7 low
+ scanned    1 file · 0 manifests · 9.5 KB · 199ms
+ score      42/100 HIGH
+ breakdown  Network 25 · Exfiltration 11 · Recon 4 · Obfuscation 1 · Filesystem 1
+ tags       #malware #obfuscated #exfiltration #recon
  verdict    BLOCK — likely malicious, do not use
- ────────────────────────────────────────────────────────────
+
 ```
 
 It exits with code 2 when anything high or above shows up, so in CI you can
