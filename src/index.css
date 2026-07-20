@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #0c0b09;
+  --panel: #12110e;
+  --panel-2: #171511;
+  --line: #2a2822;
+  --line-soft: #201e19;
+  --paper: #e8e2d5;
+  --paper-dim: #a39d8f;
+  --paper-faint: #6e6a5f;
+  --vermilion: #d63a2a;
+  --vermilion-soft: #d63a2a22;
+  --gold: #d4b34a;
+  --orange: #e07b39;
+  --sage: #8a9a7b;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  background-color: var(--ink);
+  color: var(--paper);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-feature-settings: "ss01", "cv01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+.font-serif-jp {
+  font-family: "Zen Old Mincho", "Noto Serif JP", serif;
+}
+
+::selection {
+  background: var(--vermilion);
+  color: var(--ink);
+}
+
+/* thin scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* hairline card */
+.card-line {
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.card-line-hover {
+  transition: box-shadow 0.25s ease, background 0.25s ease;
+}
+.card-line-hover:hover {
+  box-shadow: inset 0 0 0 1px #e8e2d545;
+  background: var(--panel-2);
+}
+
+/* vertical japanese text */
+.vertical-rl {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}
+
+/* faint paper texture dots */
+.texture::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: radial-gradient(#e8e2d508 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+/* details/summary */
+details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+details[open] .chev {
+  transform: rotate(90deg);
+}
+.chev {
+  transition: transform 0.2s ease;
+  display: inline-block;
+}
+
+/* active nav marker */
+.nav-item {
+  position: relative;
+  transition: color 0.2s ease, padding-left 0.2s ease;
+}
+.nav-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 1px;
+  background: var(--vermilion);
+  transition: width 0.2s ease;
+}
+.nav-item.active {
+  color: var(--paper);
+  padding-left: 14px;
+}
+.nav-item.active::before {
+  width: 9px;
+}
+
+code.inline {
+  background: #e8e2d512;
+  box-shadow: inset 0 0 0 1px #e8e2d51f;
+  padding: 0.1em 0.35em;
+  border-radius: 2px;
+  font-size: 0.875em;
+  color: var(--paper);
+}
