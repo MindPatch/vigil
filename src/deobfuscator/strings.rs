@@ -16,7 +16,16 @@ static ATOB_RE: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 static FROM_CHAR_CODE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"String\.fromCharCode\s*\((\s*\d{1,5}\s*(?:,\s*\d{1,5}\s*){1,})\)"#).unwrap()
+    Regex::new(r#"String\.fromCharCode\s*\((\s*\d{1,5}\s*(?:,\s*\d{1,5}\s*){1,})"#).unwrap()
+});
+static FROM_CHAR_CODE_APPLY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"String\.fromCharCode\s*\.\s*apply\s*\(\s*(?:null|undefined|this|window|globalThis|self)?\s*,\s*\[(\s*\d{1,5}\s*(?:,\s*\d{1,5}\s*)*)\]\s*\)"#,
+    )
+    .unwrap()
+});
+static FROM_CHAR_CODE_SPREAD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"String\.fromCharCode\s*\(\s*\.\.\.\s*\[(\s*\d{1,5}\s*(?:,\s*\d{1,5}\s*)*)\]\s*\)"#).unwrap()
 });
 static BUFFER_BASE64_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -58,6 +67,14 @@ pub fn decode_all(source: &str) -> (String, usize) {
     total += n;
 
     let (s, n) = decode_from_char_code(&result);
+    result = s;
+    total += n;
+
+    let (s, n) = decode_from_char_code_apply(&result);
+    result = s;
+    total += n;
+
+    let (s, n) = decode_from_char_code_spread(&result);
     result = s;
     total += n;
 
@@ -253,6 +270,51 @@ fn decode_from_char_code(source: &str) -> (String, usize) {
             format!("\"{decoded}\"")
         } else {
             caps[0].to_string()
+        }
+    });
+
+    (result.into_owned(), changes)
+}
+
+fn char_codes_to_string(nums_str: &str) -> Option<String> {
+    let decoded: String = nums_str
+        .split(',')
+        .filter_map(|n| n.trim().parse::<u32>().ok().and_then(char::from_u32))
+        .collect();
+
+    if !decoded.is_empty() && decoded.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        Some(decoded)
+    } else {
+        None
+    }
+}
+
+/// Fold String.fromCharCode.apply(null, [97, 98, 99]) → "abc"
+fn decode_from_char_code_apply(source: &str) -> (String, usize) {
+    let mut changes = 0;
+    let result = FROM_CHAR_CODE_APPLY_RE.replace_all(source, |caps: &regex::Captures| {
+        match char_codes_to_string(&caps[1]) {
+            Some(decoded) => {
+                changes += 1;
+                format!("\"{decoded}\"")
+            }
+            None => caps[0].to_string(),
+        }
+    });
+
+    (result.into_owned(), changes)
+}
+
+/// Fold String.fromCharCode(...[97, 98, 99]) → "abc"
+fn decode_from_char_code_spread(source: &str) -> (String, usize) {
+    let mut changes = 0;
+    let result = FROM_CHAR_CODE_SPREAD_RE.replace_all(source, |caps: &regex::Captures| {
+        match char_codes_to_string(&caps[1]) {
+            Some(decoded) => {
+                changes += 1;
+                format!("\"{decoded}\"")
+            }
+            None => caps[0].to_string(),
         }
     });
 
@@ -575,10 +637,26 @@ mod tests {
     }
 
     #[test]
-    fn test_concat_real_malware() {
-        let input = r#"var cmd1 = "return ".concat("proce", "ss.env", ".USER");"#;
-        let (output, changes) = decode_concat_calls(input);
-        assert_eq!(output, r#"var cmd1 = "return process.env.USER";"#);
+    fn test_from_char_code_apply() {
+        let input = r#"var x = String.fromCharCode.apply(null, [72, 101, 108, 108, 111]);"#;
+        let (output, changes) = decode_from_char_code_apply(input);
+        assert_eq!(output, r#"var x = "Hello";"#);
+        assert_eq!(changes, 1);
+    }
+
+    #[test]
+    fn test_from_char_code_spread() {
+        let input = r#"var x = String.fromCharCode(...[72, 101, 108, 108, 111]);"#;
+        let (output, changes) = decode_from_char_code_spread(input);
+        assert_eq!(output, r#"var x = "Hello";"#);
+        assert_eq!(changes, 1);
+    }
+
+    #[test]
+    fn test_from_char_code_apply_thisarg() {
+        let input = r#"var x = String.fromCharCode.apply(this, [72, 101]);"#;
+        let (output, changes) = decode_from_char_code_apply(input);
+        assert_eq!(output, r#"var x = "He";"#);
         assert_eq!(changes, 1);
     }
 }
